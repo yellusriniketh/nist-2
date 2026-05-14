@@ -1,0 +1,70 @@
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
+
+import requests
+from bs4 import BeautifulSoup
+
+base_url = "https://webbook.nist.gov/cgi/fluid.cgi?Action=Data&Wide=on&ID=C74828&Type=IsoBar&Digits=5&P={pressure}&THigh={t_high}&TLow={t_low}&TInc={t_inc}&RefState=DEF&TUnit=K&PUnit=bar&DUnit=kg%2Fm3&HUnit=kJ%2Fkg&WUnit=m%2Fs&VisUnit=Pa*s&STUnit=N%2Fm"
+
+min_temp = 90.6941
+max_temp = 626
+temperature_increment = 1
+max_points_per_fetch = 600
+pressures = list(range(0, 1000)) + [1000]
+file_prefix = "methane"
+output_dir = Path(file_prefix)
+output_dir.mkdir(parents=True, exist_ok=True)
+max_workers = 20
+
+
+def fetch_pressure(pressure):
+    combined_content = ""
+    t_low = min_temp
+
+    while t_low <= max_temp:
+        t_high = min(t_low + temperature_increment * (max_points_per_fetch - 1), max_temp)
+        url = base_url.format(
+            pressure=pressure,
+            t_high=t_high,
+            t_low=t_low,
+            t_inc=temperature_increment,
+        )
+        response = requests.get(url)
+
+        if response.status_code == 200:
+            soup = BeautifulSoup(response.content, 'html.parser')
+            html_content = soup.prettify()
+
+            if t_low == min_temp:
+                # Keep the first chunk contiguous and trim its trailing whitespace
+                combined_content += html_content.rstrip()
+            else:
+                # Remove the first line (header) for subsequent chunks and add exactly one separator newline
+                lines = html_content.splitlines()
+                if lines:  # Check if the content is not empty
+                    combined_content += "\n" + "\n".join(lines[1:])  # Join all lines except the first one.
+        else:
+            print(f"Failed to retrieve webpage for P={pressure}, TLow={t_low}, THigh={t_high}. Status code: {response.status_code}")
+
+        if t_high >= max_temp:
+            break
+
+        t_low = t_high + temperature_increment
+
+    filename = output_dir / f"{file_prefix}_{pressure}.txt"
+    with open(filename, "w", encoding="utf-8") as file:
+        file.write(combined_content)
+
+    return filename
+
+
+with ThreadPoolExecutor(max_workers=max_workers) as executor:
+    futures = {executor.submit(fetch_pressure, pressure): pressure for pressure in pressures}
+
+    for future in as_completed(futures):
+        pressure = futures[future]
+        try:
+            filename = future.result()
+            print(f"Webpage content saved to '{filename}'.")
+        except Exception as exc:
+            print(f"Failed to process pressure {pressure}: {exc}")
